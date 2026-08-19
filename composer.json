@@ -1,14 +1,15 @@
 {
 	"name": "wp-movie-showcase/wp-movie-showcase",
 	"description": "Development dependencies for the WP Movie Showcase plugin.",
+	"license": "GPL-2.0-or-later",
 	"type": "project",
 	"require-dev": {
 		"automattic/vipwpcs": "^3.0",
 		"dealerdirect/phpcodesniffer-composer-installer": "^1.1"
 	},
 	"scripts": {
-		"lint": "phpcs",
-		"lint:fix": "phpcbf"
+		"lint": "@php vendor/bin/phpcs",
+		"lint:fix": "@php vendor/bin/phpcbf"
 	},
 	"config": {
 		"allow-plugins": {

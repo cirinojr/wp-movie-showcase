@@ -75,7 +75,9 @@ Cache durations:
 * Movie not found: 15 minutes.
 * Hot movie result: 7 days after promotion.
 
-Only successful complete movie results are promoted to the hot cache. Errors are not cached.
+The durations above remain the fresh windows. Complete and hot movie results have an additional 24-hour stale grace period, and non-empty suggestions have a 1-hour stale grace period. Stale data is returned immediately while one refresh is scheduled through WP-Cron. A cross-request lock prevents concurrent refreshes for the same key.
+
+Negative entries do not use stale-while-revalidate. Only successful complete movie results are promoted to the hot cache. Errors are not cached and failed refreshes do not delete usable stale data.
 
 == Accessibility ==
 
@@ -97,6 +99,10 @@ Available commands:
 * `npm run lint:css` - lint SCSS files.
 * `npm run zip` - generate the installable ZIP.
 * `composer lint` - run PHPCS with the configured VIP ruleset.
+* `npm run test:php` - run deterministic cache behavior tests.
+* `npm run benchmark` - compare cold, fresh, stale, and failed-refresh paths.
+
+Detailed cache design documentation is available in `docs/cache-architecture.md`.
 
 Release builds load runtime assets from `build/`. Development files such as `src/`, `node_modules/`, `vendor/`, and local tooling files are excluded from the ZIP.
 
@@ -134,3 +140,4 @@ The cache namespace changes with the active API key, so new requests use a new c
 = 1.0.0 =
 
 * Initial release.
+* Added stale-while-revalidate, cross-request refresh locks, background refresh, cache observability, tests, and CI while preserving the adaptive cache policy.

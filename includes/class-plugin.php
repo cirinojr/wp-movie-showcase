@@ -13,6 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class Plugin {
+	private const REFRESH_HOOK = 'wp_movie_showcase_refresh_cache';
 	private string $plugin_file;
 
 	private Settings $settings;
@@ -22,7 +23,7 @@ final class Plugin {
 	public function __construct( string $plugin_file ) {
 		$this->plugin_file = $plugin_file;
 		$this->settings    = new Settings();
-		$this->movies      = new Movie_Service( $this->settings->get_api_key() );
+		$this->movies      = new Movie_Service( $this->settings->get_api_key(), array( $this, 'schedule_refresh' ) );
 	}
 
 	public static function activate(): void {
@@ -38,6 +39,7 @@ final class Plugin {
 
 		\add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 		\add_action( 'init', array( $this, 'register_block' ) );
+		\add_action( self::REFRESH_HOOK, array( $this, 'run_refresh' ), 10, 4 );
 	}
 
 	public function register_rest_routes(): void {
@@ -145,7 +147,7 @@ final class Plugin {
 				return $this->rest_error( $movie );
 			}
 
-			return new WP_REST_Response( $movie, 200 );
+			return $this->rest_response( $movie );
 		}
 
 		if ( ! is_string( $title ) ) {
@@ -162,7 +164,7 @@ final class Plugin {
 			return $this->rest_error( $movie );
 		}
 
-		return new WP_REST_Response( $movie, 200 );
+		return $this->rest_response( $movie );
 	}
 
 	public function search_suggestions( WP_REST_Request $request ) {
@@ -186,7 +188,26 @@ final class Plugin {
 			return $this->rest_error( $suggestions );
 		}
 
-		return new WP_REST_Response( $suggestions, 200 );
+		return $this->rest_response( $suggestions );
+	}
+
+	public function schedule_refresh( string $operation, string $argument, string $lock_key, string $token ): bool {
+		$result = \wp_schedule_single_event(
+			time(),
+			self::REFRESH_HOOK,
+			array( $operation, $argument, $lock_key, $token ),
+			true
+		);
+
+		return true === $result;
+	}
+
+	public function run_refresh( string $operation, string $argument, string $lock_key, string $token ): void {
+		$result = $this->movies->refresh( $operation, $argument );
+
+		if ( ! \is_wp_error( $result ) ) {
+			$this->movies->release_refresh_lock( $lock_key, $token );
+		}
 	}
 
 	public function validate_imdb_id( $value ): bool {
@@ -267,5 +288,17 @@ final class Plugin {
 			$error->get_error_message(),
 			array( 'status' => $status )
 		);
+	}
+
+	private function rest_response( array $data ): WP_REST_Response {
+		$response = new WP_REST_Response( $data, 200 );
+		$debug    = ( defined( 'WP_MOVIE_SHOWCASE_CACHE_DEBUG' ) && WP_MOVIE_SHOWCASE_CACHE_DEBUG ) ||
+			( defined( 'WP_DEBUG' ) && WP_DEBUG );
+
+		if ( $debug ) {
+			$response->header( 'X-WP-Movie-Cache', $this->movies->get_last_cache_status() );
+		}
+
+		return $response;
 	}
 }

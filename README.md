@@ -16,6 +16,45 @@ WP Movie Showcase adds a **Movie Search** block to WordPress. Visitors can searc
 
 The compiled production assets are committed to the repository, so the plugin works immediately after installation. Node.js and Composer are only needed when contributing or rebuilding the project.
 
+## Why this architecture exists
+
+External API calls introduce latency, processing cost, rate-limit pressure, and an external availability dependency. The cache architecture avoids unnecessary upstream calls and returns frequently requested data immediately, while stale-while-revalidate keeps the interface responsive without giving up eventual freshness.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Browser memory cache] --> B[WordPress REST API]
+    B --> C[L1 request cache]
+    C --> D[L2 object cache or Transients]
+    D --> E{State}
+    E -->|Fresh| F[Return]
+    E -->|Stale| G[Return and schedule async refresh]
+    E -->|Miss or expired| H[OMDb API]
+    G --> I[Refresh lock]
+    I --> J[WP-Cron refresh]
+    J --> H
+```
+
+Frequently accessed movies are promoted after five cache hits and remain fresh for seven days instead of the normal 12 hours. SWR begins only after the applicable fresh window. A cross-request lock ensures concurrent stale requests can reuse the cached value while only one refresh job reaches OMDb.
+
+If a background refresh times out or receives an invalid upstream response, the valid stale entry remains available until its bounded stale window ends. Negative responses stay short-lived and never use SWR, preventing an old “not found” result from hiding newly available data.
+
+See [Cache Architecture](docs/cache-architecture.md) for lifecycle details, invalidation, locking behavior, observability, failure modes, and trade-offs.
+
+## Performance
+
+The deterministic benchmark was run locally on PHP 8.2.12 with a mocked 50 ms OMDb delay:
+
+| Scenario | Perceived time | OMDb calls |
+|---|---:|---:|
+| Cold request | 58.170 ms | 1 |
+| Fresh cache hit | 0.105 ms | 0 |
+| Stale cache hit | 0.091 ms | 0 |
+| Stale after failed refresh | 0.190 ms | 0 |
+
+These are measured harness results, not production latency claims. Run `npm run benchmark` in the target environment for a comparable local measurement.
+
 ## Features
 
 - Dynamic Gutenberg block with server-side rendering.
@@ -132,6 +171,8 @@ npm run start       # Watch and rebuild assets
 npm run build       # Create production assets in build/
 npm run lint:js     # Lint JavaScript
 npm run lint:css    # Lint SCSS
+npm run test:php    # Run deterministic cache behavior tests
+npm run benchmark   # Compare cold, fresh, stale, and failed-refresh paths
 npm run zip         # Generate an installable plugin ZIP
 composer lint       # Run PHPCS with the configured VIP ruleset
 ```
@@ -157,4 +198,3 @@ The cache namespace changes with the active API key, so subsequent requests use 
 Licensed under [GPL-2.0-or-later](https://www.gnu.org/licenses/gpl-2.0.html).
 
 WP Movie Showcase is not affiliated with IMDb or OMDb. Movie data is supplied by the OMDb API.
-

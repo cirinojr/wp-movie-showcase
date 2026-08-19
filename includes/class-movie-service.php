@@ -18,6 +18,8 @@ final class Movie_Service {
 	private const CACHE_PREFIX = 'wms_';
 
 	private const CACHE_NAMESPACE = 'v3';
+	private const CACHE_SCHEMA_VERSION = 4;
+	private const CACHE_GENERATION_OPTION = 'wp_movie_showcase_cache_generation';
 
 	private const POSITIVE_TTL = 12 * HOUR_IN_SECONDS;
 
@@ -32,6 +34,13 @@ final class Movie_Service {
 	private const HOT_THRESHOLD = 5;
 
 	private const HOT_MAX_HITS = 100;
+	private const MOVIE_STALE_TTL = 24 * HOUR_IN_SECONDS;
+	private const SUGGESTION_STALE_TTL = HOUR_IN_SECONDS;
+	private const REFRESH_LOCK_TTL = 2 * MINUTE_IN_SECONDS;
+
+	public const OPERATION_TITLE = 'movie_title';
+	public const OPERATION_ID = 'movie_id';
+	public const OPERATION_SUGGESTIONS = 'suggestions';
 
 	private const TYPE_MOVIE = 'movie';
 
@@ -67,10 +76,40 @@ final class Movie_Service {
 	private array $request_cache = array();
 
 	private array $hot_cache_updates = array();
+	private Cache_Lock $lock;
+	private $scheduler;
+	private $clock;
+	private string $last_cache_status = 'MISS';
 
-	public function __construct( string $api_key ) {
+	public function __construct( string $api_key, ?callable $scheduler = null, ?Cache_Lock $lock = null, ?callable $clock = null ) {
 		$this->api_key        = trim( $api_key );
 		$this->cache_namespace = $this->build_cache_namespace();
+		$this->scheduler       = $scheduler;
+		$this->clock           = $clock;
+		$this->lock            = $lock ?? new Cache_Lock( $clock );
+	}
+
+	public function get_last_cache_status(): string {
+		return $this->last_cache_status;
+	}
+
+	public function invalidate_movie( string $title = '', string $imdb_id = '' ): void {
+		foreach ( array_filter( array( $this->movie_title_key( $title ), $this->movie_id_key( $imdb_id ) ) ) as $key ) {
+			$this->delete( $key );
+		}
+	}
+
+	public function invalidate_search( string $query ): void {
+		$query = $this->normalize_title( $query );
+
+		if ( '' !== $query ) {
+			$this->delete( 'sg:' . $query );
+		}
+	}
+
+	public static function invalidate_namespace(): void {
+		$generation = max( 1, (int) \get_option( self::CACHE_GENERATION_OPTION, 1 ) );
+		\update_option( self::CACHE_GENERATION_OPTION, $generation + 1, false );
 	}
 
 	public function search_movie( string $title ) {
@@ -91,7 +130,7 @@ final class Movie_Service {
 		}
 
 		$key    = $this->movie_title_key( $title );
-		$cached = $this->get( $key );
+		$cached = $this->get( $key, self::OPERATION_TITLE, $title );
 
 		if ( null !== $cached ) {
 			return $this->cached_result( $cached );
@@ -124,7 +163,7 @@ final class Movie_Service {
 		}
 
 		$key    = $this->movie_id_key( $imdb_id );
-		$cached = $this->get( $key );
+		$cached = $this->get( $key, self::OPERATION_ID, $imdb_id );
 
 		if ( null !== $cached ) {
 			return $this->cached_result( $cached );
@@ -155,7 +194,7 @@ final class Movie_Service {
 		}
 
 		$key    = 'sg:' . $this->normalize_title( $query );
-		$cached = $this->get( $key );
+		$cached = $this->get( $key, self::OPERATION_SUGGESTIONS, $query );
 
 		if ( is_array( $cached ) ) {
 			return $cached;
@@ -175,7 +214,7 @@ final class Movie_Service {
 			$error = $this->omdb_error( $data );
 
 			if ( 'wp_movie_showcase_not_found' === $error->get_error_code() ) {
-				$this->set( $key, false, self::NEGATIVE_TTL, self::TYPE_NOT_FOUND );
+				$this->set( $key, false, self::NEGATIVE_TTL, self::TYPE_NOT_FOUND, 0 );
 			}
 
 			return $error;
@@ -214,7 +253,7 @@ final class Movie_Service {
 				return $error;
 			}
 
-			$this->set( $key, array(), self::NEGATIVE_TTL, self::TYPE_SUGGESTIONS );
+			$this->set( $key, array(), self::NEGATIVE_TTL, self::TYPE_SUGGESTIONS, 0 );
 
 			return array();
 		}
@@ -250,13 +289,40 @@ final class Movie_Service {
 			$key,
 			$suggestions,
 			empty( $suggestions ) ? self::NEGATIVE_TTL : self::SUGGESTION_TTL,
-			self::TYPE_SUGGESTIONS
+			self::TYPE_SUGGESTIONS,
+			empty( $suggestions ) ? 0 : self::SUGGESTION_STALE_TTL
 		);
 
 		return $suggestions;
 	}
 
+	/**
+	 * Refreshes one known operation without reading the cache first.
+	 */
+	public function refresh( string $operation, string $argument ) {
+		$this->trace( 'SWR_REFRESH' );
+
+		switch ( $operation ) {
+			case self::OPERATION_TITLE:
+				$title = $this->clean_text( $argument );
+				return $this->request_movie( array( 't' => $title, 'plot' => 'short' ), $this->movie_title_key( $title ) );
+			case self::OPERATION_ID:
+				$imdb_id = $this->normalize_imdb_id( $argument );
+				return $this->request_movie( array( 'i' => $imdb_id, 'plot' => 'short' ), $this->movie_id_key( $imdb_id ) );
+			case self::OPERATION_SUGGESTIONS:
+				$query = $this->clean_text( $argument );
+				return $this->request_suggestions( $query, 'sg:' . $this->normalize_title( $query ) );
+		}
+
+		return new WP_Error( 'wp_movie_showcase_invalid_refresh', 'Invalid refresh operation.' );
+	}
+
+	public function release_refresh_lock( string $cache_key, string $token ): void {
+		$this->lock->release( $cache_key, $token );
+	}
+
 	private function request_data( array $params ) {
+		$this->trace( 'UPSTREAM_FETCH' );
 		$response = \wp_safe_remote_get(
 			\add_query_arg(
 				array_merge(
@@ -390,29 +456,50 @@ final class Movie_Service {
 		return $cached;
 	}
 
-	private function get( string $key ) {
+	private function get( string $key, string $operation, string $argument ) {
 		if ( array_key_exists( $key, $this->request_cache ) ) {
-			return $this->request_cache[ $key ];
+			$this->set_status( 'MEMORY_HIT' );
+			return $this->request_cache[ $key ]['value'];
 		}
 
 		$envelope = $this->get_cached_value( $key );
 
 		if ( null === $envelope ) {
+			$this->set_status( 'CACHE_MISS' );
 			return null;
 		}
 
-		$value = $envelope['value'];
+		$now = $this->now();
 
-		$this->request_cache[ $key ] = $value;
-		$this->maybe_promote_hot_cache( $key, $envelope );
+		if ( $now > $envelope['stale_until'] ) {
+			$this->delete( $key );
+			$this->set_status( 'CACHE_MISS' );
+			return null;
+		}
 
-		return $value;
+		$this->request_cache[ $key ] = $envelope;
+
+		if ( $now <= $envelope['fresh_until'] ) {
+			$this->set_status( false === $envelope['value'] || array() === $envelope['value'] ? 'NEGATIVE_HIT' : 'CACHE_FRESH' );
+			$this->maybe_promote_hot_cache( $key, $envelope );
+			return $envelope['value'];
+		}
+
+		$this->set_status( 'CACHE_STALE' );
+		$this->schedule_stale_refresh( $key, $operation, $argument );
+
+		return $envelope['value'];
 	}
 
-	private function set( string $key, $value, int $ttl, string $type ): void {
+	private function set( string $key, $value, int $ttl, string $type, int $stale_ttl ): void {
+		$now      = $this->now();
 		$envelope = array(
-			'type'  => $type,
-			'value' => $value,
+			'schema'       => self::CACHE_SCHEMA_VERSION,
+			'type'         => $type,
+			'value'        => $value,
+			'cached_at'    => $now,
+			'fresh_until'  => $now + $ttl,
+			'stale_until'  => $now + $ttl + max( 0, $stale_ttl ),
 		);
 
 		if ( self::TYPE_MOVIE === $type ) {
@@ -420,23 +507,27 @@ final class Movie_Service {
 			$envelope['hot']  = false;
 		}
 
-		$this->request_cache[ $key ] = $value;
-		$this->cache_value( $key, $envelope, $ttl );
+		$this->request_cache[ $key ] = $envelope;
+		$this->cache_value( $key, $envelope );
 	}
 
 	private function cache_movie( array $movie, string $primary_key, int $ttl ): void {
 		foreach ( $this->movie_cache_keys( $movie, $primary_key ) as $key ) {
-			$this->set( $key, $movie, $ttl, self::TYPE_MOVIE );
+			$this->set( $key, $movie, $ttl, self::TYPE_MOVIE, self::MOVIE_STALE_TTL );
 		}
 	}
 
 	private function cache_hot_movie( string $primary_key, array $envelope ): void {
-		$movie = $envelope['value'];
+		$movie                    = $envelope['value'];
+		$now                      = $this->now();
+		$envelope['cached_at']    = $now;
+		$envelope['fresh_until']  = $now + self::HOT_TTL;
+		$envelope['stale_until']  = $now + self::HOT_TTL + self::MOVIE_STALE_TTL;
 
 		foreach ( $this->movie_cache_keys( $movie, $primary_key ) as $key ) {
-			$this->request_cache[ $key ]     = $movie;
+			$this->request_cache[ $key ]     = $envelope;
 			$this->hot_cache_updates[ $key ] = true;
-			$this->cache_value( $key, $envelope, self::HOT_TTL );
+			$this->cache_value( $key, $envelope );
 		}
 	}
 
@@ -499,9 +590,9 @@ final class Movie_Service {
 		return $data;
 	}
 
-	private function cache_value( string $key, $value, int $ttl ): void {
+	private function cache_value( string $key, array $value ): void {
 		$cache_key = $this->cache_key( $key );
-		$ttl       = max( 300, $ttl );
+		$ttl       = max( 300, $value['stale_until'] - $this->now() );
 
 		if ( \wp_using_ext_object_cache() ) {
 			// phpcs:ignore WordPressVIPMinimum.Performance.LowExpiryCacheTime.CacheTimeUndetermined -- Fixed TTL.
@@ -514,26 +605,36 @@ final class Movie_Service {
 
 	private function cache_key( string $key ): string {
 		return self::CACHE_PREFIX . substr(
-			hash( 'sha256', self::CACHE_NAMESPACE . ':' . $this->cache_namespace . ':' . $key ),
+			hash( 'sha256', self::CACHE_NAMESPACE . ':' . self::CACHE_SCHEMA_VERSION . ':' . $this->cache_namespace . ':' . $key ),
 			0,
 			32
 		);
 	}
 
 	private function build_cache_namespace(): string {
+		$generation = max( 1, (int) \get_option( self::CACHE_GENERATION_OPTION, 1 ) );
+
 		if ( '' === $this->api_key ) {
-			return 'nokey';
+			return 'nokey:' . $generation;
 		}
 
-		return substr( hash( 'sha256', $this->api_key ), 0, 8 );
+		return substr( hash( 'sha256', $this->api_key ), 0, 8 ) . ':' . $generation;
 	}
 
 	private function is_valid_cache_envelope( $data ): bool {
 		if (
 			! is_array( $data ) ||
+			! isset( $data['schema'] ) ||
+			self::CACHE_SCHEMA_VERSION !== $data['schema'] ||
 			! isset( $data['type'] ) ||
 			! is_string( $data['type'] ) ||
-			! array_key_exists( 'value', $data )
+			! array_key_exists( 'value', $data ) ||
+			! isset( $data['cached_at'], $data['fresh_until'], $data['stale_until'] ) ||
+			! is_int( $data['cached_at'] ) ||
+			! is_int( $data['fresh_until'] ) ||
+			! is_int( $data['stale_until'] ) ||
+			$data['cached_at'] > $data['fresh_until'] ||
+			$data['fresh_until'] > $data['stale_until']
 		) {
 			return false;
 		}
@@ -647,7 +748,48 @@ final class Movie_Service {
 		}
 
 		$envelope['hits'] = $next_hits;
-		$this->cache_value( $key, $envelope, self::POSITIVE_TTL );
+		$now                     = $this->now();
+		$envelope['cached_at']   = $now;
+		$envelope['fresh_until'] = $now + self::POSITIVE_TTL;
+		$envelope['stale_until'] = $now + self::POSITIVE_TTL + self::MOVIE_STALE_TTL;
+		$this->request_cache[ $key ] = $envelope;
+		$this->cache_value( $key, $envelope );
+	}
+
+	private function schedule_stale_refresh( string $key, string $operation, string $argument ): void {
+		$lock_key = $this->cache_key( $key );
+		$token    = $this->lock->acquire( $lock_key, self::REFRESH_LOCK_TTL );
+
+		if ( null === $token ) {
+			$this->trace( 'SWR_LOCKED' );
+			return;
+		}
+
+		if ( ! is_callable( $this->scheduler ) || true !== ( $this->scheduler )( $operation, $argument, $lock_key, $token ) ) {
+			$this->lock->release( $lock_key, $token );
+			return;
+		}
+
+		$this->trace( 'SWR_REFRESH' );
+	}
+
+	private function set_status( string $status ): void {
+		$this->last_cache_status = $status;
+		$this->trace( $status );
+	}
+
+	private function trace( string $event ): void {
+		$debug = ( defined( 'WP_MOVIE_SHOWCASE_CACHE_DEBUG' ) && WP_MOVIE_SHOWCASE_CACHE_DEBUG ) ||
+			( defined( 'WP_DEBUG' ) && WP_DEBUG );
+
+		if ( $debug ) {
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Explicit opt-in cache diagnostics.
+			error_log( 'WP Movie Showcase cache: ' . $event );
+		}
+	}
+
+	private function now(): int {
+		return is_callable( $this->clock ) ? (int) ( $this->clock )() : time();
 	}
 
 	private function movie_title_key( string $title ): string {

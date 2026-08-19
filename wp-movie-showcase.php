@@ -21,6 +21,7 @@ define( 'WP_MOVIE_SHOWCASE_FILE', __FILE__ );
 define( 'WP_MOVIE_SHOWCASE_DIR', plugin_dir_path( __FILE__ ) );
 
 require_once WP_MOVIE_SHOWCASE_DIR . 'includes/class-settings.php';
+require_once WP_MOVIE_SHOWCASE_DIR . 'includes/class-cache-lock.php';
 require_once WP_MOVIE_SHOWCASE_DIR . 'includes/class-movie-service.php';
 require_once WP_MOVIE_SHOWCASE_DIR . 'includes/class-plugin.php';
 
