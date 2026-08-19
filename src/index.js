@@ -12,7 +12,7 @@ function Edit() {
 				label={ __( 'Movie Search', 'wp-movie-showcase' ) }
 				instructions={ __(
 					'The movie search form is rendered on the frontend.',
-					'wp-movie-showcase',
+					'wp-movie-showcase'
 				) }
 			/>
 		</div>
