@@ -124,7 +124,7 @@ function createMovieMarkup( rootElement, movie ) {
 			? `${ normalizeValue( movie.title ) } ${ __(
 					'poster',
 					'wp-movie-showcase'
-				) }`
+			  ) }`
 			: __( 'Movie poster', 'wp-movie-showcase' );
 		image.loading = 'lazy';
 		image.decoding = 'async';
@@ -135,7 +135,9 @@ function createMovieMarkup( rootElement, movie ) {
 			'error',
 			() => {
 				image.remove();
-				article.classList.add( 'wp-movie-showcase__result-card--no-poster' );
+				article.classList.add(
+					'wp-movie-showcase__result-card--no-poster'
+				);
 			},
 			{ once: true }
 		);
@@ -322,7 +324,9 @@ function createOption( rootElement, suggestion, index ) {
 		image.addEventListener(
 			'error',
 			() => {
-				image.replaceWith( createOptionPosterPlaceholder( documentRef ) );
+				image.replaceWith(
+					createOptionPosterPlaceholder( documentRef )
+				);
 			},
 			{ once: true }
 		);
@@ -357,7 +361,9 @@ function bindBlock( rootElement ) {
 	const form = rootElement.querySelector( '.wp-movie-showcase__form' );
 	const input = rootElement.querySelector( '.wp-movie-showcase__input' );
 	const button = rootElement.querySelector( '.wp-movie-showcase__button' );
-	const clearButton = rootElement.querySelector( '.wp-movie-showcase__clear' );
+	const clearButton = rootElement.querySelector(
+		'.wp-movie-showcase__clear'
+	);
 	const listbox = rootElement.querySelector(
 		'.wp-movie-showcase__suggestions'
 	);
@@ -474,7 +480,9 @@ function bindBlock( rootElement ) {
 		}
 
 		suggestions.forEach( ( suggestion, index ) => {
-			listbox.appendChild( createOption( rootElement, suggestion, index ) );
+			listbox.appendChild(
+				createOption( rootElement, suggestion, index )
+			);
 		} );
 
 		listbox.hidden = false;
@@ -546,7 +554,7 @@ function bindBlock( rootElement ) {
 					: __(
 							'Unable to complete the search. Please try again.',
 							'wp-movie-showcase'
-						);
+					  );
 
 			renderMessage( resultsContainer, message );
 			setStatus( statusElement, message, 'error' );
@@ -565,7 +573,9 @@ function bindBlock( rootElement ) {
 		input.value = normalizeValue( suggestion.title );
 		updateButtonState( input, button );
 		clearButton.hidden = false;
-		await loadMovie( `imdb_id=${ encodeURIComponent( suggestion.imdb_id ) }` );
+		await loadMovie(
+			`imdb_id=${ encodeURIComponent( suggestion.imdb_id ) }`
+		);
 		input.focus();
 	}
 
@@ -603,7 +613,10 @@ function bindBlock( rootElement ) {
 			}
 
 			try {
-				const items = await fetchSuggestions( query, controller.signal );
+				const items = await fetchSuggestions(
+					query,
+					controller.signal
+				);
 
 				if ( requestId !== suggestionRequestId ) {
 					return;
@@ -670,7 +683,11 @@ function bindBlock( rootElement ) {
 	form.addEventListener( 'submit', async ( event ) => {
 		event.preventDefault();
 
-		if ( activeIndex >= 0 && ! listbox.hidden && suggestions[ activeIndex ] ) {
+		if (
+			activeIndex >= 0 &&
+			! listbox.hidden &&
+			suggestions[ activeIndex ]
+		) {
 			await selectSuggestion( suggestions[ activeIndex ] );
 			return;
 		}
