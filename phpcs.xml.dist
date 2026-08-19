@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<ruleset name="WP Movie Showcase">
+	<description>PHPCS rules for the WP Movie Showcase plugin.</description>
+
+	<arg name="basepath" value="."/>
+	<arg value="ps"/>
+	<arg name="colors"/>
+	<arg name="extensions" value="php"/>
+
+	<file>wp-movie-showcase.php</file>
+	<file>includes</file>
+	<file>src</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+	<exclude-pattern>*/build/*</exclude-pattern>
+
+	<config name="text_domain" value="wp-movie-showcase"/>
+	<config name="prefixes" value="wp_movie_showcase,WP_Movie_Showcase"/>
+
+	<rule ref="WordPress-VIP-Go"/>
+</ruleset>
