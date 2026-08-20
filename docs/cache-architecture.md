@@ -21,12 +21,15 @@ flowchart TD
     E --> F{Entry state}
     F -->|Fresh| G[Return immediately]
     F -->|Stale| H[Return immediately]
-    H --> I[Acquire refresh lock]
+    H --> I[Acquire scheduling lock]
     I --> J[Schedule WP-Cron refresh]
     F -->|Miss or expired| K[Fetch OMDb synchronously]
-    J --> L[Fetch OMDb in background]
+    J --> L[Re-read persistent entry]
+    L -->|Fresh, missing, or expired| N[Stop]
+    L -->|Stale| O[Acquire execution lock]
+    O --> P[Fetch OMDb in background]
     K --> M[Validate and cache]
-    L --> M
+    P --> M
 ```
 
 L2 uses the persistent WordPress object cache when one is configured. Otherwise it uses Transients. These are alternative persistent backends, not two sequential cache layers.
@@ -77,7 +80,31 @@ The lock stores a random ownership token. With the database fallback, expired ta
 
 The portable object-cache API exposes atomic add, but no atomic compare-and-delete. Object-cache locks therefore use lease-only release: successful workers do not explicitly delete them, and the short TTL removes them safely. This is preferable to a check-then-delete race and has no effect on fresh data, whose TTL is much longer than the lock lease. A failed refresh deliberately leaves either backend's lease in place as a two-minute retry backoff.
 
-One refresh is scheduled per lock lease. WordPress Cron is intentionally used because it has no required external dependency and is compatible with standard WordPress and WordPress VIP. Like all WP-Cron work, execution depends on site traffic unless the installation connects WP-Cron to a system scheduler.
+One refresh is scheduled per scheduling-lock lease. WordPress Cron is intentionally used because it has no required external dependency and is compatible with standard WordPress and WordPress VIP.
+
+## Scheduling vs execution deduplication
+
+Scheduling and execution are separate concurrency boundaries:
+
+```text
+stale request
+→ scheduling lock
+→ WP-Cron job
+
+worker execution
+→ re-check persistent freshness
+→ execution lock
+→ re-check persistent freshness
+→ upstream only if still necessary
+```
+
+The scheduling lock prevents concurrent stale requests from creating the same job during one two-minute lease. It cannot prove that only one job exists forever: default WP-Cron is traffic-triggered, and execution may occur after the requested timestamp and after that lease expires.
+
+Workers are therefore idempotent. Each job verifies that its scheduled cache key still matches the service's active API-key hash, namespace generation, and schema version. It then reads the persistent backend directly, without trusting request-local state. Fresh entries stop immediately. Missing or expired entries also stop, so an obsolete job does not recreate data removed by invalidation or normal expiry.
+
+Only a still-stale entry proceeds to an execution lock. After acquiring ownership, the worker re-reads persistent state to close the race where another worker refreshed between the first read and lock acquisition. The OMDb request timeout is five seconds and the execution lease is two minutes. Within that lease and the atomic acquisition guarantees of the selected backend, only the owner contacts OMDb for that stale representation.
+
+This use tolerates eventual WP-Cron execution because stale data has already been returned to the visitor. Installations requiring predictable timing may connect WordPress cron processing to a system scheduler; that is an operational option, not a plugin requirement, and WP-Cron is not treated as a durable queue.
 
 ## Failure handling
 
@@ -114,7 +141,7 @@ ETag and shared `Cache-Control` headers are deliberately not emitted. WordPress 
 
 ## Observability
 
-Set `WP_MOVIE_SHOWCASE_CACHE_DEBUG` to `true` (or enable `WP_DEBUG`) to log cache events and add the `X-WP-Movie-Cache` REST response header. Possible events include `MEMORY_HIT`, `CACHE_FRESH`, `CACHE_STALE`, `CACHE_MISS`, `UPSTREAM_FETCH`, `SWR_REFRESH`, `SWR_LOCKED`, and `NEGATIVE_HIT`. No keys, API credentials, queries, or movie payloads are logged.
+Set `WP_MOVIE_SHOWCASE_CACHE_DEBUG` to `true` (or enable `WP_DEBUG`) to log cache events and add the `X-WP-Movie-Cache` REST response header. Possible events include `MEMORY_HIT`, `CACHE_FRESH`, `CACHE_STALE`, `CACHE_MISS`, `UPSTREAM_FETCH`, `SWR_SCHEDULED`, `SWR_REFRESH`, `SWR_LOCKED`, `SWR_EXECUTION_LOCKED`, and `NEGATIVE_HIT`. No keys, API credentials, queries, or movie payloads are logged.
 
 ## Trade-offs
 

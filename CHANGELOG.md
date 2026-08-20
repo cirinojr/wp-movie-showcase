@@ -10,5 +10,6 @@ All notable changes to WP Movie Showcase are documented here.
 - Added adaptive promotion for frequently accessed movies.
 - Added bounded stale-while-revalidate windows and WP-Cron refresh jobs.
 - Added cross-request stampede protection with ownership-aware locks.
+- Added idempotent WP-Cron workers with persistent freshness checks and execution deduplication.
 - Added negative caching, cache namespace/schema invalidation, and alias invalidation.
 - Added deterministic benchmarks, PHPUnit coverage, WordPress VIP linting, and CI.

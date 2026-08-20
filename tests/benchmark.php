@@ -77,7 +77,7 @@ measured(
 
 $GLOBALS['wms_remote'][] = new WP_Error( 'timeout', 'Simulated timeout' );
 $worker                  = new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' );
-$worker->refresh( $job[0], $job[1] );
+$worker->refresh_if_needed( $job[0], $job[1], $job[2] );
 
 measured(
 	'Stale after failed refresh',

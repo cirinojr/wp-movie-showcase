@@ -23,7 +23,9 @@ WP Movie Showcase is a working movie and TV search block, but its engineering fo
 
 - Adaptive caching retains movies according to actual demand.
 - SWR returns bounded stale data immediately while refreshing in the background.
-- Cross-request locks prevent concurrent stale requests becoming concurrent OMDb calls.
+- Scheduling and execution locks prevent concurrent stale requests and delayed workers becoming duplicate OMDb calls.
+- Ownership-aware cross-request locks prevent an old worker from releasing a newer lease.
+- Event-driven alias, namespace, schema, and API-key invalidation keeps obsolete cache entries unreachable.
 - Persistent object caches are supported, with Transients as a portable alternative.
 - Short-lived negative caching avoids repeatedly requesting known misses.
 - API failures do not overwrite usable stale data.
@@ -42,26 +44,32 @@ External API calls introduce latency, processing cost, rate-limit pressure, and 
 | Reuse fresh cached data | Fewer OMDb calls and less quota pressure |
 | Return cached data | Less user-facing latency |
 | Serve stale and refresh asynchronously | The current visitor does not wait for refresh |
-| Acquire one refresh lock | Concurrent stale requests do not fan out upstream |
+| Coordinate scheduling and worker execution | Concurrent requests and delayed jobs do not unnecessarily fan out upstream |
 | Preserve stale after refresh failure | Temporary OMDb failure does not immediately become user-facing failure |
 
 ## Cache architecture
 
 ```mermaid
 flowchart TD
-    A[Browser bounded memory cache] --> B[WordPress REST API]
-    B --> C[L1 request-local cache]
-    C --> D[L2 object cache OR Transients]
-    D --> E{State}
-    E -->|Fresh| F[Return immediately]
-    E -->|Stale| G[Return immediately]
-    G --> I[Atomic refresh lock]
-    I --> J[WP-Cron refresh]
-    J --> K[OMDb API]
-    E -->|Miss or expired| K
+    subgraph Critical[Critical path]
+        A[Request] --> B[Shared cache]
+        B -->|Fresh| C[Return]
+        B -->|Stale| D[Return + attempt schedule]
+        B -->|Miss or expired| E[Synchronous OMDb]
+    end
+    subgraph Background[Background path]
+        F[Scheduled job] --> G[Re-read shared cache]
+        G -->|Fresh, missing, or expired| H[Stop]
+        G -->|Stale| I[Execution lock]
+        I --> J[OMDb]
+        J --> K[Validate + replace cache]
+    end
+    D --> F
 ```
 
-Frequently accessed movies are promoted after five cache hits and remain fresh for seven days instead of the normal 12 hours. SWR begins only after the applicable fresh window. A cross-request lock ensures concurrent stale requests can reuse the cached value while only one refresh job reaches OMDb.
+Frequently accessed movies are promoted after five cache hits and remain fresh for seven days instead of the normal 12 hours. SWR begins only after the applicable fresh window. Concurrent stale requests are deduplicated when scheduling refreshes, while delayed workers re-check persistent cache freshness and coordinate execution before contacting OMDb.
+
+Scheduling deduplication is not execution deduplication. Because WP-Cron may run after a refresh lease has expired, the worker must re-check shared cache state before contacting the upstream service. Missing or expired entries are not recreated by an obsolete background job; normal requests remain responsible for synchronous misses.
 
 If a background refresh times out or receives an invalid upstream response, the valid stale entry remains available until its bounded stale window ends. Negative responses stay short-lived and never use SWR, preventing an old “not found” result from hiding newly available data.
 
@@ -73,10 +81,10 @@ The deterministic benchmark was run locally on PHP 8.2.12 with a mocked 50 ms OM
 
 | Scenario | Cache state | Perceived time | OMDb calls |
 |---|---|---:|---:|
-| Cold request | `CACHE_MISS` | 58.974 ms | 1 |
-| Fresh cache hit | `CACHE_FRESH` | 0.110 ms | 0 |
-| Stale cache hit | `CACHE_STALE` | 0.122 ms | 0 |
-| Stale after failed refresh | `CACHE_STALE` | 0.181 ms | 0 |
+| Cold request | `CACHE_MISS` | 56.378 ms | 1 |
+| Fresh cache hit | `CACHE_FRESH` | 0.124 ms | 0 |
+| Stale cache hit | `CACHE_STALE` | 0.135 ms | 0 |
+| Stale after failed refresh | `CACHE_STALE` | 0.294 ms | 0 |
 
 These are measured harness results, not production latency claims. Run `npm run benchmark` in the target environment for a comparable local measurement.
 

@@ -203,7 +203,7 @@ final class Plugin {
 	}
 
 	public function run_refresh( string $operation, string $argument, string $lock_key, string $token ): void {
-		$result = $this->movies->refresh( $operation, $argument );
+		$result = $this->movies->refresh_if_needed( $operation, $argument, $lock_key );
 
 		if ( ! \is_wp_error( $result ) ) {
 			$this->movies->release_refresh_lock( $lock_key, $token );

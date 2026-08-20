@@ -37,6 +37,7 @@ final class Movie_Service {
 	private const MOVIE_STALE_TTL = 24 * HOUR_IN_SECONDS;
 	private const SUGGESTION_STALE_TTL = HOUR_IN_SECONDS;
 	private const REFRESH_LOCK_TTL = 2 * MINUTE_IN_SECONDS;
+	private const EXECUTION_LOCK_PREFIX = 'execution:';
 
 	public const OPERATION_TITLE = 'movie_title';
 	public const OPERATION_ID = 'movie_id';
@@ -327,6 +328,47 @@ final class Movie_Service {
 		}
 
 		return new WP_Error( 'wp_movie_showcase_invalid_refresh', 'Invalid refresh operation.' );
+	}
+
+	/**
+	 * Refreshes a scheduled stale entry only when its shared state still requires it.
+	 */
+	public function refresh_if_needed( string $operation, string $argument, string $scheduled_cache_key ) {
+		$key = $this->refresh_key( $operation, $argument );
+
+		if ( null === $key || ! hash_equals( $this->cache_key( $key ), $scheduled_cache_key ) ) {
+			return false;
+		}
+
+		$envelope = $this->get_cached_value( $key );
+
+		if ( ! $this->needs_background_refresh( $envelope ) ) {
+			return false;
+		}
+
+		$execution_key   = self::EXECUTION_LOCK_PREFIX . $scheduled_cache_key;
+		$execution_token = $this->lock->acquire( $execution_key, self::REFRESH_LOCK_TTL );
+
+		if ( null === $execution_token ) {
+			$this->trace( 'SWR_EXECUTION_LOCKED' );
+			return false;
+		}
+
+		// Another worker may have refreshed after our first read but before lock acquisition.
+		$envelope = $this->get_cached_value( $key );
+
+		if ( ! $this->needs_background_refresh( $envelope ) ) {
+			$this->lock->release( $execution_key, $execution_token );
+			return false;
+		}
+
+		$result = $this->refresh( $operation, $argument );
+
+		if ( ! \is_wp_error( $result ) ) {
+			$this->lock->release( $execution_key, $execution_token );
+		}
+
+		return $result;
 	}
 
 	public function release_refresh_lock( string $cache_key, string $token ): void {
@@ -782,7 +824,31 @@ final class Movie_Service {
 			return;
 		}
 
-		$this->trace( 'SWR_REFRESH' );
+		$this->trace( 'SWR_SCHEDULED' );
+	}
+
+	private function refresh_key( string $operation, string $argument ): ?string {
+		switch ( $operation ) {
+			case self::OPERATION_TITLE:
+				return $this->movie_title_key( $this->clean_text( $argument ) );
+			case self::OPERATION_ID:
+				return $this->movie_id_key( $this->normalize_imdb_id( $argument ) );
+			case self::OPERATION_SUGGESTIONS:
+				$query = $this->normalize_title( $argument );
+				return '' === $query ? null : 'sg:' . $query;
+		}
+
+		return null;
+	}
+
+	private function needs_background_refresh( $envelope ): bool {
+		if ( ! is_array( $envelope ) ) {
+			return false;
+		}
+
+		$now = $this->now();
+
+		return $now > $envelope['fresh_until'] && $now <= $envelope['stale_until'];
 	}
 
 	private function set_status( string $status ): void {

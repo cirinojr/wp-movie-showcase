@@ -67,4 +67,12 @@ final class CacheLockTest extends TestCase {
 		$this->assertNotNull( $new_token );
 		$this->assertNull( $lock->acquire( 'movie', 10 ) );
 	}
+
+	public function test_object_cache_allows_only_one_execution_owner_per_lease(): void {
+		$GLOBALS['wms_ext_cache'] = true;
+		$lock                     = new Cache_Lock( 'wms_clock' );
+
+		$this->assertNotNull( $lock->acquire( 'execution:movie', 120 ) );
+		$this->assertNull( $lock->acquire( 'execution:movie', 120 ) );
+	}
 }

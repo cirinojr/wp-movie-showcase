@@ -257,6 +257,6 @@ function wms_queue_response( array $data ): void {
 	$GLOBALS['wms_remote'][] = array( 'status' => 200, 'body' => json_encode( $data ) );
 }
 
-function wms_service( ?callable $scheduler = null, string $api_key = 'api-key' ): WP_Movie_Showcase\Movie_Service {
-	return new WP_Movie_Showcase\Movie_Service( $api_key, $scheduler, null, 'wms_clock' );
+function wms_service( ?callable $scheduler = null, string $api_key = 'api-key', ?WP_Movie_Showcase\Cache_Lock $lock = null ): WP_Movie_Showcase\Movie_Service {
+	return new WP_Movie_Showcase\Movie_Service( $api_key, $scheduler, $lock, 'wms_clock' );
 }
