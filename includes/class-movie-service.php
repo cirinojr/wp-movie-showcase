@@ -94,7 +94,19 @@ final class Movie_Service {
 	}
 
 	public function invalidate_movie( string $title = '', string $imdb_id = '' ): void {
-		foreach ( array_filter( array( $this->movie_title_key( $title ), $this->movie_id_key( $imdb_id ) ) ) as $key ) {
+		$provided_keys = array_filter( array( $this->movie_title_key( $title ), $this->movie_id_key( $imdb_id ) ) );
+		$keys          = $provided_keys;
+
+		foreach ( $provided_keys as $key ) {
+			$envelope = $this->request_cache[ $key ] ?? $this->get_cached_value( $key );
+
+			if ( is_array( $envelope ) && self::TYPE_MOVIE === $envelope['type'] ) {
+				$keys = array_merge( $keys, $this->movie_cache_keys( $envelope['value'], $key ) );
+				break;
+			}
+		}
+
+		foreach ( array_unique( $keys ) as $key ) {
 			$this->delete( $key );
 		}
 	}

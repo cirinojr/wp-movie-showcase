@@ -31,11 +31,11 @@ function benchmark_movie(): array {
 function measured( string $label, callable $callback ): void {
 	$before_calls = $GLOBALS['wms_calls'];
 	$started      = hrtime( true );
-	$callback();
+	$cache_state  = (string) $callback();
 	$milliseconds = ( hrtime( true ) - $started ) / 1000000;
 	$calls        = $GLOBALS['wms_calls'] - $before_calls;
 
-	printf( "%-36s %8.3f ms | OMDb calls: %d\n", $label, $milliseconds, $calls );
+	printf( "%-36s %8.3f ms | OMDb calls: %d | Cache: %s\n", $label, $milliseconds, $calls, $cache_state );
 }
 
 $job = array();
@@ -48,19 +48,31 @@ $GLOBALS['wms_remote'][] = array( 'status' => 200, 'body' => json_encode( benchm
 
 measured(
 	'Cold request',
-	static fn() => ( new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' ) )->search_movie( 'The Matrix' )
+	static function () use ( $scheduler ): string {
+		$service = new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' );
+		$service->search_movie( 'The Matrix' );
+		return $service->get_last_cache_status();
+	}
 );
 
 measured(
 	'Fresh cache hit',
-	static fn() => ( new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' ) )->search_movie( 'The Matrix' )
+	static function () use ( $scheduler ): string {
+		$service = new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' );
+		$service->search_movie( 'The Matrix' );
+		return $service->get_last_cache_status();
+	}
 );
 
 $GLOBALS['wms_now'] += 12 * HOUR_IN_SECONDS + 1;
 
 measured(
 	'Stale cache hit',
-	static fn() => ( new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' ) )->search_movie( 'The Matrix' )
+	static function () use ( $scheduler ): string {
+		$service = new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' );
+		$service->search_movie( 'The Matrix' );
+		return $service->get_last_cache_status();
+	}
 );
 
 $GLOBALS['wms_remote'][] = new WP_Error( 'timeout', 'Simulated timeout' );
@@ -69,7 +81,11 @@ $worker->refresh( $job[0], $job[1] );
 
 measured(
 	'Stale after failed refresh',
-	static fn() => ( new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' ) )->search_movie( 'The Matrix' )
+	static function () use ( $scheduler ): string {
+		$service = new Movie_Service( 'benchmark-key', $scheduler, null, 'benchmark_clock' );
+		$service->search_movie( 'The Matrix' );
+		return $service->get_last_cache_status();
+	}
 );
 
 echo "\nThe benchmark uses a deterministic 50 ms simulated upstream delay.\n";

@@ -73,7 +73,9 @@ A negative response is useful briefly because it prevents repeated identical mis
 
 The refresh lock is scoped to the hashed cache key and has a two-minute lease. With a persistent object cache, acquisition uses atomic `wp_cache_add()`. Without one, acquisition uses the uniqueness of `add_option()`, which is shared through the WordPress database across PHP processes.
 
-The lock stores a random ownership token. A successful worker releases only the lock it owns, reducing the risk that a delayed worker deletes a newer lease. A failed refresh deliberately leaves the short lease in place as a two-minute retry backoff. The TTL also allows recovery after a fatal error or abandoned cron job.
+The lock stores a random ownership token. With the database fallback, expired takeover is an atomic compare-and-swap: the update succeeds only when both the option name and serialized value still match the value that was read. Release is an atomic compare-and-delete using the same ownership snapshot. This prevents a delayed worker from deleting or replacing a newer owner's lock.
+
+The portable object-cache API exposes atomic add, but no atomic compare-and-delete. Object-cache locks therefore use lease-only release: successful workers do not explicitly delete them, and the short TTL removes them safely. This is preferable to a check-then-delete race and has no effect on fresh data, whose TTL is much longer than the lock lease. A failed refresh deliberately leaves either backend's lease in place as a two-minute retry backoff.
 
 One refresh is scheduled per lock lease. WordPress Cron is intentionally used because it has no required external dependency and is compatible with standard WordPress and WordPress VIP. Like all WP-Cron work, execution depends on site traffic unless the installation connects WP-Cron to a system scheduler.
 
@@ -87,7 +89,7 @@ Cache keys include the operation, normalized title or IMDb ID, cache namespace, 
 
 Invalidation is available at four levels:
 
-- `invalidate_movie()` removes known title and/or IMDb ID keys.
+- `invalidate_movie()` resolves a movie through any supplied title or IMDb alias, derives the canonical title and IMDb ID from the cached payload, and removes every known alias plus request-local hot metadata.
 - `invalidate_search()` removes one normalized suggestion query.
 - `invalidate_namespace()` increments the namespace generation for a logical full purge.
 - `CACHE_SCHEMA_VERSION` makes incompatible envelopes unreachable after a schema change.
@@ -101,6 +103,10 @@ The frontend retains its existing bounded, navigation-local `Map` for suggestion
 The browser may revalidate against WordPress, but only the server decides whether OMDb must be contacted. This prevents browser and server SWR from producing duplicate upstream requests.
 
 Intent-based detail prefetch was also left out. Pointer and keyboard movement through a five-item list is too weak a signal to justify extra REST traffic, and selection already benefits from the server's ID cache.
+
+## Why not localStorage or a Service Worker?
+
+`localStorage` is synchronous, duplicates stale/invalidation policy in the browser, and persists data beyond the navigation where it is useful. A Service Worker would add lifecycle, versioning, and HTTP-cache coordination for a small autocomplete payload. The bounded `Map` gives immediate repeat-query reuse without serialization, persistent stale state, or another cache authority.
 
 ## HTTP caching
 
@@ -117,6 +123,18 @@ Set `WP_MOVIE_SHOWCASE_CACHE_DEBUG` to `true` (or enable `WP_DEBUG`) to log cach
 - Cache envelopes consume more storage than raw values.
 - Namespace invalidation leaves unreachable entries until their physical TTL expires; this avoids backend-specific wildcard deletion.
 - Database option locks add a small write cost on installations without persistent object caching.
+
+## Why not cache everything forever?
+
+OMDb metadata can change, negative results can become valid, and permanent entries create unbounded storage and invalidation pressure. Fresh and stale windows bound how old a response may be while still allowing temporary upstream failures to be hidden. Namespace generations make broad invalidation predictable, and physical expiry eventually reclaims unreachable entries.
+
+## Rejected alternatives
+
+- **Action Scheduler:** stronger queue semantics are unnecessary because refresh is opportunistic and stale data has already been returned.
+- **Custom lock table:** a new schema and maintenance lifecycle are disproportionate to one short mutex.
+- **Redis-specific CAS commands:** they would make Redis mandatory and break the portable object-cache contract.
+- **Browser persistent storage:** rejected for the synchronization and invalidation costs described above.
+- **HTTP proxy caching:** rejected because it could outlive server-side namespace and stale boundaries.
 
 ## When SWR should NOT be used
 

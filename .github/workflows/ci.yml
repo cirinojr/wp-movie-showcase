@@ -8,6 +8,31 @@ permissions:
   contents: read
 
 jobs:
+  php-tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['7.4', '8.2', '8.3']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run PHPUnit
+        run: composer test
+
   quality:
     runs-on: ubuntu-latest
 
@@ -18,7 +43,7 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '7.4'
+          php-version: '8.2'
           tools: composer:v2
           coverage: none
 
@@ -28,16 +53,13 @@ jobs:
       - name: Install PHP dependencies
         run: composer install --no-interaction --prefer-dist
 
-      - name: Run PHP cache tests
-        run: php tests/run.php
-
       - name: Run WordPress VIP coding standards
         run: composer lint
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install JavaScript dependencies

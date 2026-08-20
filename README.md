@@ -4,36 +4,61 @@
 
 # WP Movie Showcase
 
-A dynamic Gutenberg block for fast, accessible movie and TV search powered by the OMDb API.
+A production-oriented Gutenberg plugin demonstrating resilient external API integration, adaptive caching, stale-while-revalidate, stampede protection, accessibility, and WordPress VIP engineering practices.
 
-[Features](#features) · [Installation](#installation) · [Configuration](#configuration) · [Development](#development)
+[![CI](https://github.com/cirinojr/wp-movie-showcase/actions/workflows/ci.yml/badge.svg)](https://github.com/cirinojr/wp-movie-showcase/actions/workflows/ci.yml)
+[![PHP 7.4+](https://img.shields.io/badge/PHP-7.4%2B-777BB4.svg)](https://www.php.net/)
+[![WordPress 6.4+](https://img.shields.io/badge/WordPress-6.4%2B-21759B.svg)](https://wordpress.org/)
+[![License: GPL-2.0-or-later](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
+
+[Architecture](#cache-architecture) · [Measured behavior](#measured-behavior) · [Installation](#installation) · [Tests](#development)
 
 </div>
 
-## Overview
+## What this project demonstrates
 
-WP Movie Showcase adds a **Movie Search** block to WordPress. Visitors can search by title, navigate autocomplete suggestions with a keyboard, and load normalized movie information without exposing the OMDb API key to the browser.
+WP Movie Showcase is a working movie and TV search block, but its engineering focus is the boundary between WordPress and a latency- and quota-constrained external API. It demonstrates PHP 7.4-compatible backend design, Gutenberg and native JavaScript, public REST endpoints, cache concurrency, failure tolerance, automated testing, CI, and accessible interaction.
 
-The compiled production assets are committed to the repository, so the plugin works immediately after installation. Node.js and Composer are only needed when contributing or rebuilding the project.
+### Engineering highlights
+
+- Adaptive caching retains movies according to actual demand.
+- SWR returns bounded stale data immediately while refreshing in the background.
+- Cross-request locks prevent concurrent stale requests becoming concurrent OMDb calls.
+- Persistent object caches are supported, with Transients as a portable alternative.
+- Short-lived negative caching avoids repeatedly requesting known misses.
+- API failures do not overwrite usable stale data.
+- The OMDb key remains server-side and is hashed in cache namespaces.
+- AbortController and request IDs prevent stale frontend responses winning races.
+- A bounded in-memory suggestion cache avoids unbounded browser growth.
+- Keyboard navigation, ARIA combobox semantics, and live announcements are preserved.
+- PHPUnit, WordPress VIP PHPCS, JavaScript/style linting, and production builds run in CI.
 
 ## Why this architecture exists
 
 External API calls introduce latency, processing cost, rate-limit pressure, and an external availability dependency. The cache architecture avoids unnecessary upstream calls and returns frequently requested data immediately, while stale-while-revalidate keeps the interface responsive without giving up eventual freshness.
 
-## Architecture
+| Engineering decision | Practical consequence |
+|---|---|
+| Reuse fresh cached data | Fewer OMDb calls and less quota pressure |
+| Return cached data | Less user-facing latency |
+| Serve stale and refresh asynchronously | The current visitor does not wait for refresh |
+| Acquire one refresh lock | Concurrent stale requests do not fan out upstream |
+| Preserve stale after refresh failure | Temporary OMDb failure does not immediately become user-facing failure |
+
+## Cache architecture
 
 ```mermaid
 flowchart TD
-    A[Browser memory cache] --> B[WordPress REST API]
-    B --> C[L1 request cache]
-    C --> D[L2 object cache or Transients]
+    A[Browser bounded memory cache] --> B[WordPress REST API]
+    B --> C[L1 request-local cache]
+    C --> D[L2 object cache OR Transients]
     D --> E{State}
-    E -->|Fresh| F[Return]
-    E -->|Stale| G[Return and schedule async refresh]
-    E -->|Miss or expired| H[OMDb API]
-    G --> I[Refresh lock]
+    E -->|Fresh| F[Return immediately]
+    E -->|Stale| G[Return immediately]
+    G --> I[Atomic refresh lock]
     I --> J[WP-Cron refresh]
-    J --> H
+    J --> K[OMDb API]
+    E -->|Miss or expired| K
 ```
 
 Frequently accessed movies are promoted after five cache hits and remain fresh for seven days instead of the normal 12 hours. SWR begins only after the applicable fresh window. A cross-request lock ensures concurrent stale requests can reuse the cached value while only one refresh job reaches OMDb.
@@ -42,18 +67,22 @@ If a background refresh times out or receives an invalid upstream response, the 
 
 See [Cache Architecture](docs/cache-architecture.md) for lifecycle details, invalidation, locking behavior, observability, failure modes, and trade-offs.
 
-## Performance
+## Measured behavior
 
 The deterministic benchmark was run locally on PHP 8.2.12 with a mocked 50 ms OMDb delay:
 
-| Scenario | Perceived time | OMDb calls |
-|---|---:|---:|
-| Cold request | 58.170 ms | 1 |
-| Fresh cache hit | 0.105 ms | 0 |
-| Stale cache hit | 0.091 ms | 0 |
-| Stale after failed refresh | 0.190 ms | 0 |
+| Scenario | Cache state | Perceived time | OMDb calls |
+|---|---|---:|---:|
+| Cold request | `CACHE_MISS` | 58.974 ms | 1 |
+| Fresh cache hit | `CACHE_FRESH` | 0.110 ms | 0 |
+| Stale cache hit | `CACHE_STALE` | 0.122 ms | 0 |
+| Stale after failed refresh | `CACHE_STALE` | 0.181 ms | 0 |
 
 These are measured harness results, not production latency claims. Run `npm run benchmark` in the target environment for a comparable local measurement.
+
+## Demo
+
+The banner is presentation artwork, not a fabricated product screenshot. A [real screenshot checklist](docs/presentation-checklist.md) defines the block-editor, autocomplete, movie-result, and settings captures still needed from an actual WordPress session.
 
 ## Features
 
@@ -84,6 +113,8 @@ Results can include the poster, title, year, age rating, runtime, genre, directo
 2. In WordPress, open **Plugins > Add New Plugin > Upload Plugin**.
 3. Select the downloaded ZIP and choose **Install Now**.
 4. Activate **WP Movie Showcase**.
+
+Tagged releases automatically produce a tested installable ZIP through the release workflow. Until the first release is tagged, use the repository ZIP or clone the project.
 
 ### With Git
 
@@ -141,27 +172,34 @@ Complete movie results are cached for 12 hours and may be promoted to a seven-da
 - Autocomplete uses combobox and listbox semantics.
 - Status updates are announced through an `aria-live` region.
 
+The search routes are intentionally public because visitors use them without authentication. Cache reuse limits repeated identical calls, but arbitrary unique queries can still consume upstream quota. Production operators should apply host-, CDN-, or WAF-level rate controls when abuse is a concern; a WordPress nonce would not rate-limit or authorize a public endpoint.
+
 ## Project structure
 
 ```text
 wp-movie-showcase/
-├── build/                  # Production assets used by WordPress
-├── docs/images/            # README artwork and documentation images
-├── includes/               # Settings, plugin bootstrap, and movie service
-├── src/                    # Block source files and styles
-├── readme.txt              # WordPress.org-compatible documentation
-├── wp-movie-showcase.php   # Plugin entry point
+├── .github/                # CI, release automation, and Dependabot
+├── build/                  # Committed production assets used by WordPress
+├── docs/                   # Architecture and presentation documentation
+├── includes/               # Settings, cache lock, service, and plugin wiring
+├── src/                    # Gutenberg and frontend source files
+├── tests/                  # PHPUnit suite, WordPress stubs, and benchmark
+├── composer.json           # PHP testing and quality tooling
 ├── package.json            # JavaScript tooling
-└── composer.json           # PHP quality tooling
+├── phpunit.xml.dist        # PHPUnit configuration
+└── wp-movie-showcase.php   # Plugin entry point
 ```
 
 ## Development
 
-Install the development dependencies:
+### Quick start
 
 ```bash
-npm ci
 composer install
+npm ci
+npm run build
+composer test
+composer lint
 ```
 
 Available commands:
@@ -171,10 +209,11 @@ npm run start       # Watch and rebuild assets
 npm run build       # Create production assets in build/
 npm run lint:js     # Lint JavaScript
 npm run lint:css    # Lint SCSS
-npm run test:php    # Run deterministic cache behavior tests
 npm run benchmark   # Compare cold, fresh, stale, and failed-refresh paths
 npm run zip         # Generate an installable plugin ZIP
-composer lint       # Run PHPCS with the configured VIP ruleset
+composer test       # Run the PHPUnit cache/concurrency suite
+composer lint       # Run WordPress VIP PHPCS
+composer test:all   # Run PHPUnit and PHPCS
 ```
 
 Before publishing a release, rebuild the assets, run the linters, and generate a fresh ZIP.

@@ -3,13 +3,22 @@
 	"version": "1.0.0",
 	"private": true,
 	"description": "Build and lint tooling for the WP Movie Showcase block.",
+	"files": [
+		"build",
+		"includes",
+		"CHANGELOG.md",
+		"LICENSE",
+		"README.md",
+		"readme.txt",
+		"wp-movie-showcase.php"
+	],
 	"scripts": {
 		"start": "wp-scripts start src/index.js src/view.js --output-path=build --webpack-copy-php",
 		"build": "wp-scripts build src/index.js src/view.js --output-path=build --webpack-copy-php",
 		"lint": "npm run lint:js && npm run lint:css",
 		"lint:js": "wp-scripts lint-js src/**/*.js",
 		"lint:css": "wp-scripts lint-style src/**/*.scss",
-		"test:php": "php tests/run.php",
+		"test:php": "composer test",
 		"benchmark": "php tests/benchmark.php",
 		"zip": "wp-scripts plugin-zip"
 	},

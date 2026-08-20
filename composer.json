@@ -5,11 +5,17 @@
 	"type": "project",
 	"require-dev": {
 		"automattic/vipwpcs": "^3.0",
-		"dealerdirect/phpcodesniffer-composer-installer": "^1.1"
+		"dealerdirect/phpcodesniffer-composer-installer": "^1.1",
+		"phpunit/phpunit": "^9.6"
 	},
 	"scripts": {
 		"lint": "@php vendor/bin/phpcs",
-		"lint:fix": "@php vendor/bin/phpcbf"
+		"lint:fix": "@php vendor/bin/phpcbf",
+		"test": "@php vendor/bin/phpunit",
+		"test:all": [
+			"@test",
+			"@lint"
+		]
 	},
 	"config": {
 		"allow-plugins": {

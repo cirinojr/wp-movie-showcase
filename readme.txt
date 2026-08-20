@@ -99,7 +99,8 @@ Available commands:
 * `npm run lint:css` - lint SCSS files.
 * `npm run zip` - generate the installable ZIP.
 * `composer lint` - run PHPCS with the configured VIP ruleset.
-* `npm run test:php` - run deterministic cache behavior tests.
+* `composer test` - run the PHPUnit cache and concurrency suite.
+* `composer test:all` - run PHPUnit and WordPress VIP PHPCS.
 * `npm run benchmark` - compare cold, fresh, stale, and failed-refresh paths.
 
 Detailed cache design documentation is available in `docs/cache-architecture.md`.

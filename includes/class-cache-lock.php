@@ -42,9 +42,7 @@ final class Cache_Lock {
 		$current = \get_option( $name, null );
 
 		if ( ! is_array( $current ) || ! isset( $current['expires_at'] ) || (int) $current['expires_at'] <= $this->now() ) {
-			\delete_option( $name );
-
-			return \add_option( $name, $value, '', 'no' ) ? $token : null;
+			return $this->compare_and_swap( $name, $current, $value ) ? $token : null;
 		}
 
 		return null;
@@ -54,20 +52,60 @@ final class Cache_Lock {
 		$name = $this->name( $key );
 
 		if ( \wp_using_ext_object_cache() ) {
-			$current = \wp_cache_get( $name, self::GROUP );
-
-			if ( is_array( $current ) && isset( $current['token'] ) && hash_equals( (string) $current['token'], $token ) ) {
-				\wp_cache_delete( $name, self::GROUP );
-			}
-
+			// The portable object-cache API has no atomic compare-and-delete.
+			// Let the short lease expire instead of risking deletion of a newer owner.
 			return;
 		}
 
 		$current = \get_option( $name, null );
 
 		if ( is_array( $current ) && isset( $current['token'] ) && hash_equals( (string) $current['token'], $token ) ) {
-			\delete_option( $name );
+			$this->compare_and_delete( $name, $current );
 		}
+	}
+
+	private function compare_and_swap( string $name, $expected, array $replacement ): bool {
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Atomic compare-and-swap is unavailable through the Options API.
+		$updated = $wpdb->update(
+			$wpdb->options,
+			array( 'option_value' => \maybe_serialize( $replacement ) ),
+			array(
+				'option_name'  => $name,
+				'option_value' => \maybe_serialize( $expected ),
+			),
+			array( '%s' ),
+			array( '%s', '%s' )
+		);
+
+		if ( 1 === $updated ) {
+			\wp_cache_delete( $name, 'options' );
+			return true;
+		}
+
+		return false;
+	}
+
+	private function compare_and_delete( string $name, $expected ): bool {
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Atomic compare-and-delete prevents an old owner deleting a newer lock.
+		$deleted = $wpdb->delete(
+			$wpdb->options,
+			array(
+				'option_name'  => $name,
+				'option_value' => \maybe_serialize( $expected ),
+			),
+			array( '%s', '%s' )
+		);
+
+		if ( 1 === $deleted ) {
+			\wp_cache_delete( $name, 'options' );
+			return true;
+		}
+
+		return false;
 	}
 
 	private function name( string $key ): string {
