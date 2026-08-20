@@ -123,7 +123,7 @@ function createMovieMarkup( rootElement, movie ) {
     image.alt = normalizeValue( movie.title )
       ? `${ normalizeValue( movie.title ) } ${ __(
           'poster',
-          'wp-movie-showcase',
+          'wp-movie-showcase'
         ) }`
       : __( 'Movie poster', 'wp-movie-showcase' );
     image.loading = 'lazy';
@@ -137,7 +137,7 @@ function createMovieMarkup( rootElement, movie ) {
         image.remove();
         article.classList.add( 'wp-movie-showcase__result-card--no-poster' );
       },
-      { once: true },
+      { once: true }
     );
     article.appendChild( image );
   } else {
@@ -278,7 +278,7 @@ function fetchSuggestions( query, signal ) {
 
   return apiFetch( {
     path: `/wp-movie-showcase/v1/suggestions?query=${ encodeURIComponent(
-      query,
+      query
     ) }`,
     signal,
   } ).then( ( suggestions ) => {
@@ -324,7 +324,7 @@ function createOption( rootElement, suggestion, index ) {
       () => {
         image.replaceWith( createOptionPosterPlaceholder( documentRef ) );
       },
-      { once: true },
+      { once: true }
     );
     option.appendChild( image );
   } else {
@@ -359,13 +359,13 @@ function bindBlock( rootElement ) {
   const button = rootElement.querySelector( '.wp-movie-showcase__button' );
   const clearButton = rootElement.querySelector( '.wp-movie-showcase__clear' );
   const listbox = rootElement.querySelector(
-    '.wp-movie-showcase__suggestions',
+    '.wp-movie-showcase__suggestions'
   );
   const statusElement = rootElement.querySelector(
-    '.wp-movie-showcase__status',
+    '.wp-movie-showcase__status'
   );
   const resultsContainer = rootElement.querySelector(
-    '.wp-movie-showcase__results',
+    '.wp-movie-showcase__results'
   );
 
   if (
@@ -529,7 +529,7 @@ function bindBlock( rootElement ) {
       }
 
       resultsContainer.replaceChildren(
-        createMovieMarkup( rootElement, movie ),
+        createMovieMarkup( rootElement, movie )
       );
     } catch ( error ) {
       if ( error && 'AbortError' === error.name ) {
@@ -545,7 +545,7 @@ function bindBlock( rootElement ) {
           ? __( 'No movie found.', 'wp-movie-showcase' )
           : __(
               'Unable to complete the search. Please try again.',
-              'wp-movie-showcase',
+              'wp-movie-showcase'
             );
 
       renderMessage( resultsContainer, message );
@@ -596,7 +596,7 @@ function bindBlock( rootElement ) {
             setStatus(
               statusElement,
               __( 'Searching…', 'wp-movie-showcase' ),
-              'searching',
+              'searching'
             );
           }
         }, SUGGESTION_STATUS_DELAY );
@@ -618,9 +618,9 @@ function bindBlock( rootElement ) {
             sprintf(
               /* translators: %d: number of autocomplete suggestions. */
               __( '%d titles available.', 'wp-movie-showcase' ),
-              suggestions.length,
+              suggestions.length
             ),
-            'results',
+            'results'
           );
           renderSuggestions();
           return;
@@ -630,7 +630,7 @@ function bindBlock( rootElement ) {
         setStatus(
           statusElement,
           __( 'No titles found.', 'wp-movie-showcase' ),
-          'empty',
+          'empty'
         );
       } catch ( error ) {
         if ( error && 'AbortError' === error.name ) {
@@ -646,9 +646,9 @@ function bindBlock( rootElement ) {
           statusElement,
           __(
             'Unable to complete the search. Please try again.',
-            'wp-movie-showcase',
+            'wp-movie-showcase'
           ),
-          'error',
+          'error'
         );
       } finally {
         window.clearTimeout( statusTimerId );
@@ -744,7 +744,7 @@ function bindBlock( rootElement ) {
     }
 
     const suggestion = suggestions.find(
-      ( item ) => item.imdb_id === option.dataset.imdbId,
+      ( item ) => item.imdb_id === option.dataset.imdbId
     );
 
     if ( suggestion ) {
