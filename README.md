@@ -22,10 +22,10 @@ WP Movie Showcase is a working movie and TV search block, but its engineering fo
 ### Engineering highlights
 
 - Adaptive caching retains movies according to actual demand.
-- SWR returns bounded stale data immediately while refreshing in the background.
-- Scheduling and execution locks prevent concurrent stale requests and delayed workers becoming duplicate OMDb calls.
-- Ownership-aware cross-request locks prevent an old worker from releasing a newer lease.
-- Event-driven alias, namespace, schema, and API-key invalidation keeps obsolete cache entries unreachable.
+- SWR returns bounded stale data immediately and schedules eventual background revalidation.
+- Scheduling and execution coordination deduplicates stale requests and delayed workers before OMDb calls.
+- Database ownership checks prevent an old worker from releasing a newer lease; Object Cache locks use lease-only release.
+- Explicit alias invalidation plus namespace generation, schema versioning, and API-key-scoped cache keys keep obsolete entries unreachable.
 - Persistent object caches are supported, with Transients as a portable alternative.
 - Short-lived negative caching avoids repeatedly requesting known misses.
 - API failures do not overwrite usable stale data.
@@ -43,7 +43,7 @@ External API calls introduce latency, processing cost, rate-limit pressure, and 
 |---|---|
 | Reuse fresh cached data | Fewer OMDb calls and less quota pressure |
 | Return cached data | Less user-facing latency |
-| Serve stale and refresh asynchronously | The current visitor does not wait for refresh |
+| Serve stale and schedule background revalidation | The current visitor does not wait for WP-Cron execution |
 | Coordinate scheduling and worker execution | Concurrent requests and delayed jobs do not unnecessarily fan out upstream |
 | Preserve stale after refresh failure | Temporary OMDb failure does not immediately become user-facing failure |
 
@@ -102,7 +102,7 @@ The banner is presentation artwork, not a fabricated product screenshot. A [real
 - Support for multiple independent blocks on one page.
 - Keyboard-friendly combobox and live status announcements.
 - Server-side API key handling and response normalization.
-- Layered caching with request memory, the WordPress object cache, and Transients.
+- Request-local caching with persistent WordPress Object Cache when available, or Transients as the portable persistent fallback.
 
 Results can include the poster, title, year, age rating, runtime, genre, director, plot, and IMDb rating. Missing values are omitted gracefully.
 
@@ -162,11 +162,10 @@ Keyboard controls include Arrow Up, Arrow Down, Enter, Escape, and Tab.
 
 The block frontend sends a request to WordPress. WordPress validates the request, calls OMDb from the server, normalizes the response, and returns only the data needed by the interface. The API key never needs to be included in client-side JavaScript.
 
-Cache lookup order:
+Cache lookup flow:
 
 1. Request-local memory.
-2. Persistent WordPress object cache, when available.
-3. WordPress Transients as the fallback.
+2. One persistent backend: WordPress Object Cache when configured, or Transients as the portable fallback.
 
 Complete movie results are cached for 12 hours and may be promoted to a seven-day hot cache. Suggestions are cached for six hours, while empty suggestions and not-found responses use a short 15-minute cache. Errors are not cached.
 

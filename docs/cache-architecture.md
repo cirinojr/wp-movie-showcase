@@ -7,8 +7,8 @@ External API calls add latency, processing cost, rate-limit pressure, and an ext
 The design combines three complementary policies:
 
 - **Adaptive caching** determines how long frequently requested movies remain fresh.
-- **Stale-while-revalidate (SWR)** returns usable data immediately while refreshing it asynchronously.
-- **Stampede protection** ensures concurrent stale requests do not all refresh the same key.
+- **Stale-while-revalidate (SWR)** returns usable data immediately and schedules eventual background revalidation.
+- **Stampede protection** coordinates concurrent stale requests before they can refresh the same key.
 
 ## Cache hierarchy
 
@@ -50,7 +50,7 @@ Each persistent entry is a versioned envelope:
 ```
 
 - **Fresh:** return immediately and make no upstream request.
-- **Stale:** return immediately and attempt to schedule one background refresh.
+- **Stale:** return immediately and attempt to schedule one eventual background revalidation.
 - **Expired:** delete the unusable entry and fetch synchronously.
 - **Miss:** fetch synchronously.
 
@@ -74,13 +74,13 @@ A negative response is useful briefly because it prevents repeated identical mis
 
 ## Stampede protection
 
-The refresh lock is scoped to the hashed cache key and has a two-minute lease. With a persistent object cache, acquisition uses atomic `wp_cache_add()`. Without one, acquisition uses the uniqueness of `add_option()`, which is shared through the WordPress database across PHP processes.
+The refresh lock is scoped to the hashed cache key and has a two-minute lease. With a persistent Object Cache whose backend honors atomic add-if-absent semantics, acquisition coordinates through `wp_cache_add()`. Without one, acquisition uses the uniqueness of `add_option()`, which is shared through the WordPress database across PHP processes.
 
 The lock stores a random ownership token. With the database fallback, expired takeover is an atomic compare-and-swap: the update succeeds only when both the option name and serialized value still match the value that was read. Release is an atomic compare-and-delete using the same ownership snapshot. This prevents a delayed worker from deleting or replacing a newer owner's lock.
 
-The portable object-cache API exposes atomic add, but no atomic compare-and-delete. Object-cache locks therefore use lease-only release: successful workers do not explicitly delete them, and the short TTL removes them safely. This is preferable to a check-then-delete race and has no effect on fresh data, whose TTL is much longer than the lock lease. A failed refresh deliberately leaves either backend's lease in place as a two-minute retry backoff.
+The portable WordPress Object Cache API can express add-if-absent but does not expose atomic compare-and-delete. Object Cache locks therefore use lease-only release: successful workers do not explicitly delete them, and the short TTL removes them safely. This avoids a check-then-delete race in which an old worker could remove a newer lease. A failed refresh deliberately leaves either backend's lease in place as a two-minute retry backoff.
 
-One refresh is scheduled per scheduling-lock lease. WordPress Cron is intentionally used because it has no required external dependency and is compatible with standard WordPress and WordPress VIP.
+When the selected backend provides the acquisition semantics described above, one refresh is scheduled per scheduling-lock lease. WordPress Cron is intentionally used because it has no required external dependency and is compatible with standard WordPress and WordPress VIP.
 
 ## Scheduling vs execution deduplication
 
@@ -114,7 +114,9 @@ Timeouts, DNS failures, non-200 responses, rate limits, malformed JSON, and inva
 
 Cache keys include the operation, normalized title or IMDb ID, cache namespace, schema version, and a truncated hash of the API key. The API key itself is never stored in plaintext in the key.
 
-Invalidation is available at four levels:
+Passive invalidation is time-based: entries move from fresh to stale and then expired according to their envelope timestamps. Explicit or logical invalidation changes which entries remain usable through targeted deletion or cache-key identity changes.
+
+Explicit and logical invalidation primitives are available at four levels:
 
 - `invalidate_movie()` resolves a movie through any supplied title or IMDb alias, derives the canonical title and IMDb ID from the cached payload, and removes every known alias plus request-local hot metadata.
 - `invalidate_search()` removes one normalized suggestion query.
@@ -122,6 +124,8 @@ Invalidation is available at four levels:
 - `CACHE_SCHEMA_VERSION` makes incompatible envelopes unreachable after a schema change.
 
 Changing the API key automatically selects a different hashed namespace.
+
+These primitives can be invoked by consuming application code or connected to domain events, but the plugin does not implement a generic domain-event system.
 
 ## Browser cache
 
