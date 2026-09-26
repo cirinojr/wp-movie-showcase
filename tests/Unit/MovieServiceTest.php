@@ -151,6 +151,43 @@ final class MovieServiceTest extends TestCase {
 		$this->assertSame( 1, $GLOBALS['wms_calls'] );
 	}
 
+	public function test_invalidation_during_refresh_does_not_restore_invalidated_data(): void {
+		wms_queue_response( wms_movie( 'The Matrix', '8.7' ) );
+		$this->assertSame( '8.7', wms_service()->search_movie( 'The Matrix' )['imdb_rating'] );
+		$GLOBALS['wms_now'] += 12 * HOUR_IN_SECONDS + 1;
+		$jobs = array();
+		$service = wms_service( static function ( ...$args ) use ( &$jobs ): bool {
+			$jobs[] = $args;
+			return true;
+		} );
+		$this->assertSame( '8.7', $service->search_movie( 'The Matrix' )['imdb_rating'] );
+		$this->assertCount( 1, $jobs );
+		$this->assertSame( 1, $GLOBALS['wms_calls'] );
+
+		wms_queue_response( wms_movie( 'The Matrix', '9.0' ) );
+		$invalidated_during_fetch = false;
+		$GLOBALS['wms_remote_hook'] = function () use ( &$invalidated_during_fetch ): void {
+			// The refresh HTTP call has started, but its successful response has not returned.
+			$this->assertSame( 2, $GLOBALS['wms_calls'] );
+			wms_service()->invalidate_movie( 'The Matrix' );
+			$invalidated_during_fetch = true;
+		};
+		$job = $jobs[0];
+		$result = wms_service()->refresh_if_needed( $job[0], $job[1], $job[2] );
+
+		$this->assertTrue( $invalidated_during_fetch );
+		$this->assertSame( '9.0', $result['imdb_rating'] );
+		$this->assertSame( 2, $GLOBALS['wms_calls'] );
+
+		// A normal request must fetch again instead of reading the discarded 9.0 response.
+		wms_queue_response( wms_movie( 'The Matrix', '9.1' ) );
+		$this->assertSame( '9.1', wms_service()->search_movie( 'The Matrix' )['imdb_rating'] );
+		$this->assertSame( 3, $GLOBALS['wms_calls'] );
+		$this->assertSame( '9.1', wms_service()->search_movie( 'The Matrix' )['imdb_rating'] );
+		$this->assertSame( '9.1', wms_service()->search_movie_by_id( 'tt0133093' )['imdb_rating'] );
+		$this->assertSame( 3, $GLOBALS['wms_calls'] );
+	}
+
 	public function test_delayed_worker_cannot_write_into_a_new_namespace(): void {
 		wms_queue_response( wms_movie() );
 		wms_service()->search_movie( 'The Matrix' );
