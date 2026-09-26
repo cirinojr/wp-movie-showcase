@@ -20,6 +20,7 @@ final class Movie_Service {
 	private const CACHE_NAMESPACE = 'v3';
 	private const CACHE_SCHEMA_VERSION = 4;
 	private const CACHE_GENERATION_OPTION = 'wp_movie_showcase_cache_generation';
+	private const INVALIDATION_OPTION = 'wp_movie_showcase_invalidation_revision';
 
 	private const POSITIVE_TTL = 12 * HOUR_IN_SECONDS;
 
@@ -81,10 +82,97 @@ final class Movie_Service {
 	private $scheduler;
 	private $clock;
 	private string $last_cache_status = 'MISS';
+	private ?array $pending_writes = null;
+	private string $memory_revision = '';
+	private ?int $execution_deadline = null;
+	private ?array $refresh_entry = null;
+
+	private static function read_revision( string $name ): string {
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- A concurrency fence must bypass request-local and persistent option caches.
+		$value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+		if ( '' !== $wpdb->last_error ) {
+			throw new Cache_Coordination_Exception( 'Could not read the movie cache revision.' );
+		}
+		return (string) $value;
+	}
+
+	private function fetch_and_publish( string $key, callable $fetch ) {
+		try {
+			return $this->fetch_with_snapshot( $key, $fetch );
+		} catch ( Cache_Coordination_Exception $error ) {
+			return $this->coordination_error();
+		}
+	}
+
+	private function coordination_error(): WP_Error {
+		return new WP_Error( 'wp_movie_showcase_service_error', \__( 'The movie service is currently unavailable.', 'wp-movie-showcase' ) );
+	}
+
+	private function fetch_with_snapshot( string $key, callable $fetch ) {
+		$snapshot = $this->lock->synchronize( function () use ( $key ): ?array {
+			$entry = $this->get_cached_value( $key );
+			if ( null !== $this->execution_deadline
+				&& ( $entry !== $this->refresh_entry || ! $this->needs_background_refresh( $entry )
+					|| $this->now() >= $this->execution_deadline || $this->cache_namespace !== $this->build_cache_namespace() ) ) {
+				return null;
+			}
+			$entries = array( $key => $entry );
+			if ( is_array( $entry ) && self::TYPE_MOVIE === $entry['type'] ) {
+				foreach ( $this->movie_cache_keys( $entry['value'], $key ) as $alias ) {
+					$entries[ $alias ] = $this->get_cached_value( $alias );
+				}
+			}
+			return array( self::read_revision( self::INVALIDATION_OPTION ), $entries );
+		} );
+		if ( null === $snapshot ) {
+			return false;
+		}
+		$deadline = $this->execution_deadline ?? $this->now() + self::REFRESH_LOCK_TTL;
+		$this->pending_writes = array();
+
+		try {
+			$result = $fetch();
+			$writes = $this->pending_writes;
+		} finally {
+			foreach ( $this->pending_writes as $write_key => $value ) {
+				unset( $this->request_cache[ $write_key ], $this->hot_cache_updates[ $write_key ] );
+			}
+			$this->pending_writes = null;
+		}
+
+		if ( $writes ) {
+			$this->lock->synchronize( function () use ( $snapshot, $deadline, $writes ): void {
+				if ( $this->now() >= $deadline
+					|| $snapshot[0] !== self::read_revision( self::INVALIDATION_OPTION )
+					|| $this->cache_namespace !== $this->build_cache_namespace() ) {
+					return;
+				}
+				foreach ( $snapshot[1] as $alias => $entry ) {
+					if ( $entry !== $this->get_cached_value( $alias ) ) {
+						return;
+					}
+				}
+
+				// All aliases are published in the same critical section as the fence check.
+				foreach ( $writes as $write_key => $value ) {
+					if ( ! array_key_exists( $write_key, $snapshot[1] ) && null !== $this->get_cached_value( $write_key ) ) {
+						continue;
+					}
+					$this->cache_value( $write_key, $value );
+					$this->request_cache[ $write_key ] = $value;
+				}
+				$this->memory_revision = $snapshot[0];
+			} );
+		}
+
+		return $result;
+	}
 
 	public function __construct( string $api_key, ?callable $scheduler = null, ?Cache_Lock $lock = null, ?callable $clock = null ) {
 		$this->api_key        = trim( $api_key );
-		$this->cache_namespace = $this->build_cache_namespace();
+		$this->cache_namespace = $this->build_cache_namespace( false );
 		$this->scheduler       = $scheduler;
 		$this->clock           = $clock;
 		$this->lock            = $lock ?? new Cache_Lock( $clock );
@@ -95,11 +183,19 @@ final class Movie_Service {
 	}
 
 	public function invalidate_movie( string $title = '', string $imdb_id = '' ): void {
+		$this->lock->synchronize( function () use ( $title, $imdb_id ): void {
+			self::advance_invalidation_revision();
+			$this->invalidate_movie_entries( $title, $imdb_id );
+		} );
+	}
+
+	private function invalidate_movie_entries( string $title, string $imdb_id ): void {
+		$this->cache_namespace = $this->build_cache_namespace();
 		$provided_keys = array_filter( array( $this->movie_title_key( $title ), $this->movie_id_key( $imdb_id ) ) );
 		$keys          = $provided_keys;
 
 		foreach ( $provided_keys as $key ) {
-			$envelope = $this->request_cache[ $key ] ?? $this->get_cached_value( $key );
+			$envelope = $this->get_cached_value( $key );
 
 			if ( is_array( $envelope ) && self::TYPE_MOVIE === $envelope['type'] ) {
 				$keys = array_merge( $keys, $this->movie_cache_keys( $envelope['value'], $key ) );
@@ -116,13 +212,28 @@ final class Movie_Service {
 		$query = $this->normalize_title( $query );
 
 		if ( '' !== $query ) {
-			$this->delete( 'sg:' . $query );
+			$this->lock->synchronize( function () use ( $query ): void {
+				self::advance_invalidation_revision();
+				$this->cache_namespace = $this->build_cache_namespace();
+				$this->delete( 'sg:' . $query );
+			} );
 		}
 	}
 
 	public static function invalidate_namespace(): void {
-		$generation = max( 1, (int) \get_option( self::CACHE_GENERATION_OPTION, 1 ) );
-		\update_option( self::CACHE_GENERATION_OPTION, $generation + 1, false );
+		( new Cache_Lock() )->synchronize( static function (): void {
+			self::advance_invalidation_revision();
+			$generation = max( 1, (int) self::read_revision( self::CACHE_GENERATION_OPTION ) );
+			if ( ! \update_option( self::CACHE_GENERATION_OPTION, $generation + 1, false ) ) {
+				throw new Cache_Coordination_Exception( 'Could not invalidate the movie cache namespace.' );
+			}
+		} );
+	}
+
+	private static function advance_invalidation_revision(): void {
+		if ( ! \update_option( self::INVALIDATION_OPTION, \wp_generate_uuid4(), false ) ) {
+			throw new Cache_Coordination_Exception( 'Could not advance the movie cache invalidation revision.' );
+		}
 	}
 
 	public function search_movie( string $title ) {
@@ -209,7 +320,7 @@ final class Movie_Service {
 		$key    = 'sg:' . $this->normalize_title( $query );
 		$cached = $this->get( $key, self::OPERATION_SUGGESTIONS, $query );
 
-		if ( is_array( $cached ) ) {
+		if ( is_array( $cached ) || \is_wp_error( $cached ) ) {
 			return $cached;
 		}
 
@@ -217,6 +328,12 @@ final class Movie_Service {
 	}
 
 	private function request_movie( array $params, string $key ) {
+		return $this->fetch_and_publish( $key, function () use ( $params, $key ) {
+			return $this->fetch_movie( $params, $key );
+		} );
+	}
+
+	private function fetch_movie( array $params, string $key ) {
 		$data = $this->request_data( $params );
 
 		if ( \is_wp_error( $data ) ) {
@@ -248,6 +365,12 @@ final class Movie_Service {
 	}
 
 	private function request_suggestions( string $query, string $key ) {
+		return $this->fetch_and_publish( $key, function () use ( $query, $key ) {
+			return $this->fetch_suggestions( $query, $key );
+		} );
+	}
+
+	private function fetch_suggestions( string $query, string $key ) {
 		$data = $this->request_data(
 			array(
 				's'    => $query,
@@ -346,6 +469,7 @@ final class Movie_Service {
 			return false;
 		}
 
+		$deadline        = $this->now() + self::REFRESH_LOCK_TTL;
 		$execution_key   = self::EXECUTION_LOCK_PREFIX . $scheduled_cache_key;
 		$execution_token = $this->lock->acquire( $execution_key, self::REFRESH_LOCK_TTL );
 
@@ -362,7 +486,14 @@ final class Movie_Service {
 			return false;
 		}
 
-		$result = $this->refresh( $operation, $argument );
+		$this->execution_deadline = $deadline;
+		$this->refresh_entry = $envelope;
+		try {
+			$result = $this->refresh( $operation, $argument );
+		} finally {
+			$this->execution_deadline = null;
+			$this->refresh_entry = null;
+		}
 
 		if ( ! \is_wp_error( $result ) ) {
 			$this->lock->release( $execution_key, $execution_token );
@@ -511,6 +642,24 @@ final class Movie_Service {
 	}
 
 	private function get( string $key, string $operation, string $argument ) {
+		try {
+			return $this->lock->synchronize( function () use ( $key, $operation, $argument ) {
+				return $this->get_current( $key, $operation, $argument );
+			} );
+		} catch ( Cache_Coordination_Exception $error ) {
+			return $this->coordination_error();
+		}
+	}
+
+	private function get_current( string $key, string $operation, string $argument ) {
+		$revision = self::read_revision( self::INVALIDATION_OPTION );
+		$namespace = $this->build_cache_namespace();
+		if ( $revision !== $this->memory_revision || $namespace !== $this->cache_namespace ) {
+			$this->request_cache = array();
+			$this->hot_cache_updates = array();
+			$this->memory_revision = $revision;
+			$this->cache_namespace = $namespace;
+		}
 		if ( array_key_exists( $key, $this->request_cache ) ) {
 			$this->set_status( 'MEMORY_HIT' );
 			return $this->request_cache[ $key ]['value'];
@@ -548,6 +697,7 @@ final class Movie_Service {
 	private function set( string $key, $value, int $ttl, string $type, int $stale_ttl ): void {
 		$now      = $this->now();
 		$envelope = array(
+			'revision'    => \wp_generate_uuid4(),
 			'schema'       => self::CACHE_SCHEMA_VERSION,
 			'type'         => $type,
 			'value'        => $value,
@@ -614,12 +764,16 @@ final class Movie_Service {
 
 		if ( \wp_using_ext_object_cache() ) {
 			$found = false;
-			$data  = \wp_cache_get( $cache_key, self::CACHE_GROUP, false, $found );
+			$data  = \wp_cache_get( $cache_key, self::CACHE_GROUP, true, $found );
 
 			if ( ! $found ) {
 				return null;
 			}
 		} else {
+			// Discard request-local option snapshots before checking another worker's publication.
+			\wp_cache_delete( '_transient_' . $cache_key, 'options' );
+			\wp_cache_delete( '_transient_timeout_' . $cache_key, 'options' );
+			\wp_cache_delete( 'notoptions', 'options' );
 			$data = \get_transient( $cache_key );
 
 			if ( false === $data ) {
@@ -628,7 +782,6 @@ final class Movie_Service {
 		}
 
 		if ( ! $this->is_valid_cache_envelope( $data ) ) {
-			$this->delete( $key );
 			return null;
 		}
 
@@ -645,6 +798,10 @@ final class Movie_Service {
 	}
 
 	private function cache_value( string $key, array $value ): void {
+		if ( null !== $this->pending_writes ) {
+			$this->pending_writes[ $key ] = $value;
+			return;
+		}
 		$cache_key = $this->cache_key( $key );
 		$ttl       = max( 300, $value['stale_until'] - $this->now() );
 
@@ -665,8 +822,8 @@ final class Movie_Service {
 		);
 	}
 
-	private function build_cache_namespace(): string {
-		$generation = max( 1, (int) \get_option( self::CACHE_GENERATION_OPTION, 1 ) );
+	private function build_cache_namespace( bool $fresh = true ): string {
+		$generation = max( 1, (int) ( $fresh ? self::read_revision( self::CACHE_GENERATION_OPTION ) : \get_option( self::CACHE_GENERATION_OPTION, 1 ) ) );
 
 		if ( '' === $this->api_key ) {
 			return 'nokey:' . $generation;

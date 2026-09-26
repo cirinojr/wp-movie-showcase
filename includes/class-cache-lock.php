@@ -9,6 +9,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * A failed coordination operation must never fall back to an unguarded write.
+ */
+final class Cache_Coordination_Exception extends \RuntimeException {}
+
+/**
  * Small cross-request lock backed by the persistent object cache or options.
  */
 final class Cache_Lock {
@@ -61,6 +66,29 @@ final class Cache_Lock {
 
 		if ( is_array( $current ) && isset( $current['token'] ) && hash_equals( (string) $current['token'], $token ) ) {
 			$this->compare_and_delete( $name, $current );
+		}
+	}
+
+	/**
+	 * Serialize publication and invalidation without an expiring lease.
+	 * The database connection owns this lock; a disconnected owner releases it.
+	 * Never perform an upstream request inside this critical section.
+	 */
+	public function synchronize( callable $callback ) {
+		global $wpdb;
+
+		$name = 'wms_publish_' . md5( ( defined( 'DB_NAME' ) ? DB_NAME : '' ) . ':' . $wpdb->options );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Connection-owned mutex closes the check/write race on either cache backend.
+		$acquired = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $name ) );
+		if ( '1' !== (string) $acquired ) {
+			throw new Cache_Coordination_Exception( 'Could not acquire the movie cache publication lock.' );
+		}
+
+		try {
+			return $callback();
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- RELEASE_LOCK only releases ownership held by this database connection.
+			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
 		}
 	}
 

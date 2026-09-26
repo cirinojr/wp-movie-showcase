@@ -19,6 +19,37 @@ $GLOBALS['wms_get_option_hook'] = null;
 
 final class WMS_Test_WPDB {
 	public string $options = 'wp_options';
+	public int $publication_locks = 0;
+	public string $last_error = '';
+
+	public function prepare( string $query, string $value ): array {
+		return array( $query, $value );
+	}
+
+	public function get_var( array $query ) {
+		$this->last_error = '';
+		if ( false !== strpos( $query[0], 'GET_LOCK' ) ) {
+			$hook = $GLOBALS['wms_publication_hook'] ?? null;
+			$GLOBALS['wms_publication_hook'] = null;
+			if ( is_callable( $hook ) ) {
+				$hook();
+			}
+			if ( $GLOBALS['wms_mutex_failure'] ?? false ) {
+				return 0;
+			}
+			++$this->publication_locks;
+			return 1;
+		}
+		if ( false !== strpos( $query[0], 'RELEASE_LOCK' ) ) {
+			--$this->publication_locks;
+			return 1;
+		}
+		if ( $GLOBALS['wms_revision_failure'] ?? false ) {
+			$this->last_error = 'Simulated database failure';
+			return null;
+		}
+		return $GLOBALS['wms_options'][ $query[1] ] ?? null;
+	}
 
 	public function update( string $table, array $data, array $where ): int {
 		$name = $where['option_name'];
@@ -202,12 +233,18 @@ function add_query_arg( array $params, string $url ): string {
 
 function wp_safe_remote_get() {
 	++$GLOBALS['wms_calls'];
+	$response = array_shift( $GLOBALS['wms_remote'] );
+	$hook = $GLOBALS['wms_remote_hook'] ?? null;
+	$GLOBALS['wms_remote_hook'] = null;
+	if ( is_callable( $hook ) ) {
+		$hook();
+	}
 
 	if ( $GLOBALS['wms_delay_us'] > 0 ) {
 		usleep( $GLOBALS['wms_delay_us'] );
 	}
 
-	return array_shift( $GLOBALS['wms_remote'] );
+	return $response;
 }
 
 function wp_remote_retrieve_response_code( $response ): int {
@@ -222,6 +259,12 @@ require_once dirname( __DIR__ ) . '/includes/class-cache-lock.php';
 require_once dirname( __DIR__ ) . '/includes/class-movie-service.php';
 
 function wms_reset_state(): void {
+	$GLOBALS['wms_publication_hook'] = null;
+	$GLOBALS['wms_mutex_failure'] = false;
+	$GLOBALS['wms_revision_failure'] = false;
+	$GLOBALS['wpdb']->last_error = '';
+	$GLOBALS['wms_remote_hook'] = null;
+	$GLOBALS['wpdb']->publication_locks = 0;
 	$GLOBALS['wms_now']             = 1700000000;
 	$GLOBALS['wms_transients']      = array();
 	$GLOBALS['wms_options']         = array();

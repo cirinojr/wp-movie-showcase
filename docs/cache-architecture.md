@@ -112,6 +112,14 @@ Timeouts, DNS failures, non-200 responses, rate limits, malformed JSON, and inva
 
 ## Invalidation
 
+Publication and explicit invalidation share a short database connection-owned mutex (`GET_LOCK` / `RELEASE_LOCK`). Unlike the scheduling/execution lease, this mutex does not expire while its connection remains alive. The upstream HTTP request always runs outside it. This requires a single MySQL/MariaDB primary and connection affinity for the critical section; database proxies, connection replacement and multi-primary deployments need separate integration validation. A failed lock acquisition or revision query prevents publication: search/refresh returns the existing service-unavailable `WP_Error`, while explicit invalidation throws a coordination exception for its caller to handle.
+
+Before fetching, the worker records the invalidation revision and the current envelopes of the entry and its known aliases. Scheduled workers also verify, under that mutex, that the envelope still matches the stale entry they observed before snapshot acquisition. New envelopes carry unique revisions. After fetching, it checks the revision, namespace, execution deadline and original envelopes under the publication mutex, then writes the aliases before releasing it. An invalidation or a newer publication therefore prevents the old response from being cached. Previously unknown aliases do not overwrite existing entries. Cache-hit metadata updates use the same mutex so they cannot restore a deleted entry either. Successful publication restores request-local reuse without incrementing persistent hit counters.
+
+The invalidation revision is a single non-autoloaded option: targeted invalidation conservatively discards any fetch already in flight, including unrelated queries, but keeps unrelated persistent entries. Request-local entries are cleared when the revision or namespace changes. No per-entry database rows or backend-specific Redis operations are required.
+
+Regression tests cover both cache backends with invalidation during HTTP execution, positive/negative suggestions, title/IMDb aliases, namespace changes and expired workers. The optional `tests/Integration/CacheMutexTest.php` verifies exclusion and ownership with two real database sessions; run it with `php vendor/bin/phpunit tests/Integration/CacheMutexTest.php` and the `WMS_MYSQL_HOST`, `WMS_MYSQL_PORT`, `WMS_MYSQL_USER`, and `WMS_MYSQL_PASSWORD` environment variables.
+
 Cache keys include the operation, normalized title or IMDb ID, cache namespace, schema version, and a truncated hash of the API key. The API key itself is never stored in plaintext in the key.
 
 Passive invalidation is time-based: entries move from fresh to stale and then expired according to their envelope timestamps. Explicit or logical invalidation changes which entries remain usable through targeted deletion or cache-key identity changes.
